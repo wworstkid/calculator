@@ -46,15 +46,16 @@ def _run_pip_install_noninteractive(pip_name: str, use_user: bool) -> Tuple[bool
 def install_package_with_gui(root: tk.Tk, pkg: str, use_user: bool) -> Tuple[bool, str, str]:
     """
     GUI installer: runs pip in background and shows a Toplevel window with live output.
+    Can install single or multiple packages (space-separated).
     """
     res = {"rc": 1, "out": "", "err": "", "done": False}
     cancelled = {"flag": False}
 
     win = tk.Toplevel(root)
-    win.title(f"Установка {pkg}")
+    win.title(f"Установка зависимостей")
     win.geometry("640x320")
     win.transient(root)
-    tk.Label(win, text=f"Устанавливается пакет: {pkg}", anchor="w").pack(fill="x", padx=8, pady=(8, 0))
+    tk.Label(win, text=f"Устанавливается: {pkg}", anchor="w").pack(fill="x", padx=8, pady=(8, 0))
     txt = tk.Text(win, wrap="word", height=14)
     txt.pack(fill="both", expand=True, padx=8, pady=8)
     txt.configure(state="disabled")
@@ -79,7 +80,9 @@ def install_package_with_gui(root: tk.Tk, pkg: str, use_user: bool) -> Tuple[boo
         txt.configure(state="disabled")
 
     def run_install():
-        cmd = [sys.executable, "-m", "pip", "install", pkg]
+        # Split pkg into multiple packages if space-separated
+        packages = pkg.split()
+        cmd = [sys.executable, "-m", "pip", "install"] + packages
         if use_user:
             cmd.append("--user")
         try:
@@ -163,62 +166,116 @@ def ensure_and_import_with_gui(pkgs: List[Tuple[str, str]]) -> Dict[str, Optiona
         root = None
 
     imported: Dict[str, Optional[object]] = {}
-
+    
+    # First pass: check what's already imported
     for pip_name, module_name in pkgs:
         mod = _try_import_module(module_name)
         if mod:
             imported[module_name] = mod
-            continue
 
-        if headless:
-            use_user = not _in_venv()
-            success, out, err = _run_pip_install_noninteractive(pip_name, use_user)
-            if success:
-                mod = _try_import_module(module_name)
-                imported[module_name] = mod
-                continue
-            else:
-                imported[module_name] = None
-                continue
+    # Collect missing packages
+    missing_pkgs: List[Tuple[str, str]] = []
+    for pip_name, module_name in pkgs:
+        if module_name not in imported or imported[module_name] is None:
+            missing_pkgs.append((pip_name, module_name))
+    
+    # If all packages are present, return
+    if not missing_pkgs:
+        if root is not None:
+            try:
+                root.destroy()
+            except Exception:
+                pass
+        return imported
 
+    # Ask user to install all missing packages at once
+    if not headless and missing_pkgs:
+        missing_names = ", ".join([pip_name for pip_name, _ in missing_pkgs])
         try:
-            answer = messagebox.askyesno("Зависимость отсутствует",
-                                         f"Пакет '{pip_name}' (модуль '{module_name}') не найден.\nУстановить сейчас? (рекомендовано для плавных анимаций)",
-                                         parent=root)
+            answer = messagebox.askyesno(
+                "Зависимости отсутствуют",
+                f"Следующие пакеты не найдены:\n{missing_names}\n\n"
+                f"Установить все сейчас? (рекомендовано для плавных анимаций)\n\n"
+                f"После установки программа будет перезагружена.",
+                parent=root
+            )
         except Exception:
             answer = False
+        
         if not answer:
-            imported[module_name] = None
-            continue
+            for pip_name, module_name in missing_pkgs:
+                imported[module_name] = None
+            if root is not None:
+                try:
+                    root.destroy()
+                except Exception:
+                    pass
+            return imported
 
-        while True:
-            use_user = not _in_venv()
-            success, out, err = install_package_with_gui(root, pip_name, use_user)
-            if success:
+        # Install all missing packages together
+        use_user = not _in_venv()
+        all_pip_names = " ".join([pip_name for pip_name, _ in missing_pkgs])
+        
+        # Show installation window
+        success, out, err = install_package_with_gui(root, all_pip_names, use_user)
+        
+        if success:
+            # Try to import each package
+            for pip_name, module_name in missing_pkgs:
                 mod = _try_import_module(module_name)
                 if mod:
                     imported[module_name] = mod
-                    break
-                else:
-                    msg = f"Пакет '{pip_name}' был установлен, но импорт модуля '{module_name}' не удался.\n\nSTDOUT:\n{out}\n\nSTDERR:\n{err}"
-                    try:
-                        retry = messagebox.askretrycancel("Ошибка импорта", msg + "\n\nПовторить попытку импорта?", parent=root)
-                    except Exception:
-                        retry = False
-                    if not retry:
-                        imported[module_name] = None
-                        break
-            else:
-                msg = f"Не удалось установить пакет '{pip_name}'.\n\nSTDOUT:\n{out}\n\nSTDERR:\n{err}"
-                try:
-                    choice = messagebox.askretrycancel("Ошибка установки", msg + "\n\nНажмите 'Повторить' чтобы попробовать снова, 'Отмена' чтобы пропустить.", parent=root)
-                except Exception:
-                    choice = False
-                if choice:
-                    continue
                 else:
                     imported[module_name] = None
-                    break
+            
+            # Restart program to ensure all modules are properly loaded
+            try:
+                messagebox.showinfo("Установка завершена", "Все пакеты успешно установлены!\n\nПрограмма будет перезагружена.", parent=root)
+            except Exception:
+                pass
+            
+            if root is not None:
+                try:
+                    root.destroy()
+                except Exception:
+                    pass
+            
+            # Restart the program
+            try:
+                import os
+                os.execv(sys.executable, [sys.executable] + sys.argv)
+            except Exception:
+                pass
+        else:
+            try:
+                messagebox.showerror("Ошибка установки", f"Не удалось установить пакеты.\n\nОшибка:\n{err}", parent=root)
+            except Exception:
+                pass
+            
+            for pip_name, module_name in missing_pkgs:
+                imported[module_name] = None
+    
+    elif headless and missing_pkgs:
+        # Headless mode: try to install packages non-interactively
+        use_user = not _in_venv()
+        cmd = [sys.executable, "-m", "pip", "install"] + [pip_name for pip_name, _ in missing_pkgs]
+        if use_user:
+            cmd.append("--user")
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+            if proc.returncode == 0:
+                for pip_name, module_name in missing_pkgs:
+                    mod = _try_import_module(module_name)
+                    if mod:
+                        imported[module_name] = mod
+                    else:
+                        imported[module_name] = None
+            else:
+                for pip_name, module_name in missing_pkgs:
+                    imported[module_name] = None
+        except Exception:
+            for pip_name, module_name in missing_pkgs:
+                imported[module_name] = None
 
     if root is not None:
         try:
@@ -465,6 +522,7 @@ class Animator:
             t.start()
 
     def fade_in(self, win: tk.Toplevel | tk.Tk, target_alpha: float = 1.0, duration: int = 220, steps: int = 12):
+        """Smooth transparency fade-in animation"""
         try:
             win.attributes("-alpha", 0.0)
         except Exception:
@@ -472,10 +530,23 @@ class Animator:
                 win.wm_attributes("-alpha", 0.0)
             except Exception:
                 return
+        # Increase steps for smoother fade-in
+        steps = max(16, steps)
         step_ms = max(1, duration // steps)
 
+        def ease_in_out_cubic(t: float) -> float:
+            """Smooth easing function for better animation feel"""
+            if t < 0.5:
+                return 4 * t * t * t
+            else:
+                f = 2 * t - 2
+                return 1 + f * f * f / 2
+
         def step(i: int = 0):
-            a = (i + 1) / steps * target_alpha
+            # Use easing function for smoother acceleration/deceleration
+            progress = (i + 1) / steps
+            eased_progress = ease_in_out_cubic(progress)
+            a = eased_progress * target_alpha
             try:
                 win.attributes("-alpha", a)
             except Exception:
@@ -580,48 +651,9 @@ class Animator:
 
     def press_animation(self, widget, shrink_factor: float = 0.92, overshoot: float = 1.03,
                         dur_ms: int = 220, steps: int = 36):
-        name = f"press_{id(widget)}"
-        self.cancel(name)
-
-        try:
-            widget.update_idletasks()
-            orig_w = int(widget.winfo_width())
-            orig_h = int(widget.winfo_height())
-        except Exception:
-            orig_w = orig_h = 0
-
-        if orig_w <= 2 or orig_h <= 2:
-            return
-
-        total_frames = max(6, steps)
-        step_ms = max(4, dur_ms // total_frames)
-        factors = self._compute_factors(total_frames, shrink_factor, overshoot)
-        if factors and factors[-1] != 1.0:
-            factors[-1] = 1.0
-
-        def frame(i: int = 0):
-            if i >= len(factors):
-                try:
-                    widget.configure(width=orig_w, height=orig_h)
-                except Exception:
-                    pass
-                self._jobs.pop(name, None)
-                return
-            f = factors[i]
-            new_w = max(1, int(orig_w * f))
-            new_h = max(1, int(orig_h * f))
-            try:
-                widget.configure(width=new_w, height=new_h)
-            except Exception:
-                try:
-                    widget.configure(width=orig_w, height=orig_h)
-                except Exception:
-                    pass
-                self._jobs.pop(name, None)
-                return
-            self._jobs[name] = self.root.after(step_ms, lambda: frame(i + 1))
-
-        frame(0)
+        # Animations related to size changes have been removed
+        # Button presses are now instant without resize animations
+        pass
 
     def animate_numeric_change(self, entry, start: float, end: float, steps: int = 8, step_ms: int = 25,
                                decimals: int = 5, use_comma: bool = True):
@@ -651,18 +683,7 @@ class Animator:
             return
 
         def frame(i: int):
-            t = i / steps
-            val = start_f + (end_f - start_f) * t
-            txt = f"{val:.{decimals}f}"
-            if use_comma:
-                txt = txt.replace(".", ",")
-            try:
-                entry.delete(0, "end"); entry.insert(0, txt)
-            except Exception:
-                pass
-            if i < steps:
-                self.schedule(name, step_ms, lambda: frame(i + 1))
-            else:
+            if i >= steps:
                 final_txt = f"{end_f:.{decimals}f}"
                 if use_comma:
                     final_txt = final_txt.replace(".", ",")
@@ -671,6 +692,17 @@ class Animator:
                 except Exception:
                     pass
                 self._jobs.pop(name, None)
+                return
+            t = (i + 1) / steps
+            val = start_f + (end_f - start_f) * t
+            txt = f"{val:.{decimals}f}"
+            if use_comma:
+                txt = txt.replace(".", ",")
+            try:
+                entry.delete(0, "end"); entry.insert(0, txt)
+            except Exception:
+                pass
+            self.schedule(name, step_ms, lambda: frame(i + 1))
 
 # ---------------------------
 # Improved Examples Generator (unique, pleasant, answer-type constraint)
@@ -915,7 +947,7 @@ class CalculatorApp:
 
     def __init__(self):
         self.root = ctk.CTk()
-        self.root.title("Калькулятор — Smooth Animations")
+        self.root.title("Калькулятор")
         self.root.geometry(f"{CFG.win_w}x{CFG.win_h}")
         self.root.resizable(*CFG.resizable)
         try:
@@ -1045,20 +1077,19 @@ class CalculatorApp:
                 elif key in "+-*/%":
                     fg = CFG.accent_alt
                 btn = self._create_button(container, key, fg, lambda ch=key: self._on_press(ch))
-                btn.configure(command=lambda b=btn, ch=key: (self.anim.press_animation(b, shrink_factor=0.92, overshoot=1.03, dur_ms=220, steps=36), self._on_press(ch)))
+                btn.configure(command=lambda ch=key: self._on_press(ch))
                 btn.grid(row=r, column=c, padx=6, pady=6, sticky="nsew")
                 if fg == CFG.accent:
                     self._accent_buttons.append(btn)
 
         specials = [
-            ("C", self.clear_all, CFG.accent_alt),
-            ("⌫", self.backspace, CFG.card),
-            ("xʸ", self.power_window, CFG.card),
-            ("□", self.figures_window_compact_centered, CFG.accent_alt),
+            ("C", lambda: self.clear_all(), CFG.accent_alt),
+            ("⌫", lambda: self.backspace(), CFG.card),
+            ("xʸ", lambda: self.power_window(), CFG.card),
+            ("□", lambda: self.figures_window_compact_centered(), CFG.accent_alt),
         ]
         for i, (txt, cmd, color) in enumerate(specials):
             btn = self._create_button(container, txt, color, cmd)
-            btn.configure(command=lambda b=btn, fn=cmd: (self.anim.press_animation(b, shrink_factor=0.92, overshoot=1.03, dur_ms=220, steps=36), self.root.after(110, fn)))
             btn.grid(row=5, column=i, padx=6, pady=(6, 10), sticky="nsew")
             if color == CFG.accent:
                 self._accent_buttons.append(btn)
@@ -1071,7 +1102,7 @@ class CalculatorApp:
         footer_frame.grid(row=6, column=0, columnspan=4, pady=(0, 8), sticky="we")
         footer_frame.grid_columnconfigure(0, weight=1)
         footer_frame.grid_columnconfigure(1, weight=0)
-        footer = ctk.CTkLabel(footer_frame, text="Compact • Smooth • Dark", text_color=CFG.muted, anchor="w", font=FONTS["ui"])
+        footer = ctk.CTkLabel(footer_frame, text="Простой в использовании", text_color=CFG.muted, anchor="w", font=FONTS["ui"])
         footer.grid(row=0, column=0, sticky="w", padx=(8, 0))
         examples_btn = ctk.CTkButton(footer_frame, text="Примеры", fg_color=CFG.accent_alt, width=100, corner_radius=6,
                                      command=self.examples_window, font=FONTS["ui"], text_color=CFG.text, hover_color=self._hover_cached(CFG.accent_alt))
@@ -1094,7 +1125,10 @@ class CalculatorApp:
             return
         try:
             result = safe_eval(expr)
-            s = str(result)
+            if isinstance(result, complex):
+                s = str(result)
+            else:
+                s = f"{result:.15g}"
             self.display.delete(0, "end")
             if len(s) > 32:
                 self.display.insert(0, "Результат слишком длинный")
@@ -1224,18 +1258,7 @@ class CalculatorApp:
         bottom_frame.configure(height=70)
         bottom_frame.pack_propagate(False)
 
-        btn = ctk.CTkButton(bottom_frame, text="Вычислить", fg_color=CFG.accent, width=200, corner_radius=6,
-                            font=FONTS["ui"], text_color=CFG.text, hover_color=self._hover_cached(CFG.accent))
-        btn.pack(side="right", padx=(0, 8), pady=(10, 10))
-
-        copy_power_btn = ctk.CTkButton(bottom_frame, text="⟡", fg_color=CFG.accent_alt, width=36, height=36, corner_radius=8,
-                                       font=FONTS["small"], text_color=CFG.text,
-                                       command=lambda: self._copy_to_clipboard(res_lbl.cget("text")),
-                                       hover_color=self._hover_cached(CFG.accent_alt))
-        copy_power_btn.pack(side="left", padx=(8, 8), pady=(10, 10))
-
         def compute_and_show():
-            self.anim.press_animation(btn)
             try:
                 x = parse_number(ex.get().strip())
                 y = parse_number(ey.get().strip())
@@ -1243,7 +1266,7 @@ class CalculatorApp:
                     res_lbl.configure(text="Комплексные показатели не поддерживаются здесь", text_color="#ffb4b4")
                 else:
                     res = float(x) ** float(y)
-                    formatted = repr(res)
+                    formatted = f"{res:.15g}"
                     short = formatted if len(formatted) <= 64 else (formatted[:61] + "...")
                     res_lbl.configure(text=f"Результат: {short}", text_color=CFG.text)
                     if len(formatted) > 64:
@@ -1254,15 +1277,22 @@ class CalculatorApp:
                 res_lbl.configure(text="Ошибка: переполнение результата", text_color="#ffb4b4")
             except Exception:
                 res_lbl.configure(text="Ошибка при вычислении", text_color="#ffb4b4")
-            finally:
-                btn.configure(text="Вычислить")
 
-        btn.configure(command=compute_and_show)
+        btn = ctk.CTkButton(bottom_frame, text="Вычислить", fg_color=CFG.accent, width=200, corner_radius=6,
+                            font=FONTS["ui"], text_color=CFG.text, hover_color=self._hover_cached(CFG.accent),
+                            command=compute_and_show)
+        btn.pack(side="right", padx=(0, 8), pady=(10, 10))
+
+        copy_power_btn = ctk.CTkButton(bottom_frame, text="⟡", fg_color=CFG.accent_alt, width=36, height=36, corner_radius=8,
+                                       font=FONTS["small"], text_color=CFG.text,
+                                       command=lambda: self._copy_to_clipboard(res_lbl.cget("text")),
+                                       hover_color=self._hover_cached(CFG.accent_alt))
+        copy_power_btn.pack(side="left", padx=(8, 8), pady=(10, 10))
 
     def figures_window_compact_centered(self):
         win_w, win_h = 520, 260
         win = ctk.CTkToplevel(self.root)
-        win.title("Фигуры — компактно")
+        win.title("Фигуры")
         try:
             rx = self.root.winfo_rootx(); ry = self.root.winfo_rooty()
             rw = self.root.winfo_width(); rh = self.root.winfo_height()
@@ -1313,6 +1343,9 @@ class CalculatorApp:
 
         fields = self.FIGURES_MAP.get(figure_name, [])
         entries: List[ctk.CTkEntry] = []
+        
+        # Store figure_name locally to ensure it's captured correctly
+        current_figure_name = figure_name
 
         inner = ctk.CTkFrame(container, fg_color=container.cget("fg_color"))
         inner.pack(fill="both", expand=True, padx=4, pady=2)
@@ -1348,7 +1381,7 @@ class CalculatorApp:
                 btn_inc = ctk.CTkButton(spin_frame, text="▲", **common_opts)
                 btn_inc.pack(side="right")
                 if not e.get().strip():
-                    e.insert(0, format_number(0, decimals=0))
+                    e.insert(0, format_number(0, decimals=0, use_comma=False))
                 def make_spin_handlers(entry: ctk.CTkEntry, step: float = 1.0, decimals: int = 0):
                     def inc():
                         try:
@@ -1357,9 +1390,9 @@ class CalculatorApp:
                                 return
                             start = int(round(float(v)))
                             target = start + int(round(step))
-                            self.anim.animate_numeric_change(entry, start, target, steps=9, step_ms=22, decimals=decimals)
+                            self.anim.animate_numeric_change(entry, start, target, steps=9, step_ms=22, decimals=decimals, use_comma=False)
                         except Exception:
-                            entry.delete(0, "end"); entry.insert(0, format_number(step, decimals=decimals))
+                            entry.delete(0, "end"); entry.insert(0, format_number(step, decimals=decimals, use_comma=False))
                     def dec():
                         try:
                             v = parse_number(entry.get())
@@ -1367,13 +1400,13 @@ class CalculatorApp:
                                 return
                             start = int(round(float(v)))
                             target = start - int(round(step))
-                            self.anim.animate_numeric_change(entry, start, target, steps=9, step_ms=22, decimals=decimals)
+                            self.anim.animate_numeric_change(entry, start, target, steps=9, step_ms=22, decimals=decimals, use_comma=False)
                         except Exception:
-                            entry.delete(0, "end"); entry.insert(0, format_number(0, decimals=decimals))
+                            entry.delete(0, "end"); entry.insert(0, format_number(-int(round(step)), decimals=decimals, use_comma=False))
                     return inc, dec
                 inc_fn, dec_fn = make_spin_handlers(e, step=1.0, decimals=0)
-                btn_inc.configure(command=lambda b=btn_inc, fn=inc_fn: (self.anim.press_animation(b), self.root.after(80, fn)))
-                btn_dec.configure(command=lambda b=btn_dec, fn=dec_fn: (self.anim.press_animation(b), self.root.after(80, fn)))
+                btn_inc.configure(command=inc_fn)
+                btn_dec.configure(command=dec_fn)
                 self._attach_copy_context(e, lambda ent=e: ent.get())
                 entries.append(e)
 
@@ -1390,7 +1423,7 @@ class CalculatorApp:
                         raise ValueError("Требуется вещественное число")
                     return float(v)
                 area = peri = vol = None
-                name = figure_name
+                name = current_figure_name
                 if name == "Прямоугольник":
                     a = getf(0); b = getf(1); area = a * b; peri = 2 * (a + b)
                 elif name == "Круг":
@@ -1430,7 +1463,7 @@ class CalculatorApp:
         copy_fig_btn.pack(side="right", padx=(6, 6), pady=(6, 4))
 
         calc_btn = ctk.CTkButton(bottom_frame, text="Вычислить", fg_color=CFG.accent, width=140, corner_radius=6,
-                                command=lambda: (self.anim.press_animation(calc_btn), self.root.after(110, compute_and_show)),
+                                command=compute_and_show,
                                 font=FONTS["ui"], text_color=CFG.text, hover_color=self._hover_cached(CFG.accent))
         calc_btn.pack(side="right", padx=(0, 8), pady=(6, 4))
 
@@ -1634,7 +1667,7 @@ class CalculatorApp:
     def run(self):
         self.root.mainloop()
 
-# ---------------------------
+# --------------------------- compact
 # Run
 # ---------------------------
 if __name__ == "__main__":
