@@ -773,6 +773,19 @@ def _is_integer_like(val: Union[int, float]) -> bool:
     except Exception:
         return False
 
+def _matches_answer_type(val: Union[int, float], answer_type: str) -> bool:
+    if answer_type == "Любой":
+        return True
+    if answer_type == "Целое":
+        return _is_integer_like(val)
+    if answer_type == "Натуральное":
+        return _is_integer_like(val) and val > 0
+    if answer_type == "Неотрицательное":
+        return _is_integer_like(val) and val >= 0
+    if answer_type == "Дробное":
+        return not _is_integer_like(val)
+    return True
+
 def generate_problems_improved(op_type: str, operand_digits: int, operands_count: int,
                                number_type: str, difficulty: str, count: int,
                                answer_type: str = "Любой", include_answers: bool = False) -> List[str]:
@@ -820,15 +833,8 @@ def generate_problems_improved(op_type: str, operand_digits: int, operands_count
                 val = safe_eval(expr_raw)
                 if isinstance(val, complex):
                     continue
-                if answer_type != "Любой":
-                    if answer_type == "Целое" and not _is_integer_like(val):
-                        continue
-                    if answer_type == "Натуральное" and not (_is_integer_like(val) and val > 0):
-                        continue
-                    if answer_type == "Неотрицательное" and not (_is_integer_like(val) and val >= 0):
-                        continue
-                    if answer_type == "Дробное" and _is_integer_like(val):
-                        continue
+                if not _matches_answer_type(val, answer_type):
+                    continue
                 # skip too big results
                 if isinstance(val, (int, float)) and abs(val) > 1e9:
                     continue
@@ -891,7 +897,7 @@ def generate_problems_improved(op_type: str, operand_digits: int, operands_count
         compact = expr_raw.replace(" ", "")
         if any(ch not in "0123456789+-*/()." for ch in compact):
             # allow decimal dot and parentheses; skip malformed
-            pass
+            continue
 
         key = canonicalize_expr_ast(expr_raw)
         if key in seen_keys:
@@ -905,17 +911,8 @@ def generate_problems_improved(op_type: str, operand_digits: int, operands_count
             # Discard extremely large results
             if isinstance(val, (int, float)) and abs(val) > 1e9:
                 continue
-            if answer_type != "Любой":
-                if answer_type == "Целое" and not _is_integer_like(val):
-                    continue
-                if answer_type == "Натуральное" and not (_is_integer_like(val) and val > 0):
-                    continue
-                if answer_type == "Неотрицательное" and not (_is_integer_like(val) and val >= 0):
-                    continue
-                if answer_type == "Дробное":
-                    # consider float with fractional part (tolerance)
-                    if _is_integer_like(val):
-                        continue
+            if not _matches_answer_type(val, answer_type):
+                continue
         except Exception:
             # skip expressions that fail to evaluate safely
             continue
